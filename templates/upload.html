@@ -140,16 +140,18 @@
         }
     });
 
-    // Stop recording
-stopButton.addEventListener("click", () => {
-    if (mediaRecorder) {
-        mediaRecorder.stop();
-        stopRecordingTimer();
-        recordingAlert.style.display = "none";
+    stopButton.addEventListener('click', stopRecording);
+
+    function stopRecording() {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+        }
+        clearInterval(recordingInterval);
+        clearTimeout(recordingTimeout);
+        recordingAlert.style.display = 'none';
         startButton.disabled = false;
         stopButton.disabled = true;
     }
-});
 
     // Handle trimming
     trimStart.addEventListener('input', () => {
@@ -187,29 +189,6 @@ stopButton.addEventListener("click", () => {
         };
         reader.readAsDataURL(trimmedBlob);
     });
-
-// Upload audio
-function uploadAudio(blob) {
-    const formData = new FormData();
-    formData.append("recorded_audio", blob, "trimmed_audio.wav");
-
-    fetch("{{ url_for('upload_media') }}", {
-        method: "POST",
-        body: formData,
-    })
-        .then((response) => {
-            if (response.ok) {
-                alert("Audio successfully uploaded!");
-            } else {
-                alert("Error uploading audio. Please try again.");
-            }
-        })
-        .catch((err) => {
-            console.error("Upload error:", err);
-            alert("Error uploading audio. Please try again.");
-        });
-}
-
 </script>
 
 {% endblock %}
