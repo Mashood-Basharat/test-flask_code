@@ -30,23 +30,9 @@
                         <button type="button" id="start-recording" class="btn-primary">Record Audio</button>
                         <button type="button" id="stop-recording" class="btn-primary" disabled>Stop Recording</button>
                         <audio id="audio-preview" controls style="display: none; margin-top: 10px;"></audio>
-                        <input type="hidden" id="recorded-audio" name="recorded_audio">
                         <div id="recording-alert" style="display: none; margin-top: 10px; color: red;">
                             Voice recording has been started. Recording time: <span id="recording-time">0</span>
                             seconds.
-                        </div>
-                        <div id="trimming-section" style="display: none; margin-top: 20px;">
-                            <h3>Trim Your Recording</h3>
-                            <p>Adjust the start and end times below:</p>
-                            <label for="trim-start">Start:</label>
-                            <input type="range" id="trim-start" min="0" max="30" value="0">
-                            <span id="start-time">0</span> seconds
-                            <br>
-                            <label for="trim-end">End:</label>
-                            <input type="range" id="trim-end" min="0" max="30" value="30">
-                            <span id="end-time">30</span> seconds
-                            <br>
-                            <button type="button" id="apply-trim" class="btn-primary">Apply Trim</button>
                         </div>
                     </div>
                     <div>
@@ -60,135 +46,179 @@
 </div>
 
 <script>
-    const audioUpload = document.getElementById('audio-upload');
-    const startButton = document.getElementById('start-recording');
-    const stopButton = document.getElementById('stop-recording');
-    const audioPreview = document.getElementById('audio-preview');
-    const recordedAudioInput = document.getElementById('recorded-audio');
-    const recordingAlert = document.getElementById('recording-alert');
-    const recordingTime = document.getElementById('recording-time');
-    const trimmingSection = document.getElementById('trimming-section');
-    const trimStart = document.getElementById('trim-start');
-    const trimEnd = document.getElementById('trim-end');
-    const startTimeLabel = document.getElementById('start-time');
-    const endTimeLabel = document.getElementById('end-time');
-    const applyTrimButton = document.getElementById('apply-trim');
-    let mediaRecorder;
-    let audioChunks = [];
-    let recordingInterval;
-    let recordingTimeout;
-    let secondsElapsed = 0;
+let audioChunks = [];
+let mediaRecorder = null;
+let audioBlob = null;
+let startTrim = 0; // Start time for trimming (in seconds)
+let endTrim = 0;   // End time for trimming (in seconds)
+let recordingTimer = null;
+let secondsElapsed = 0;
 
-    // Disable upload when recording starts
-    startButton.addEventListener('click', async () => {
-        audioUpload.disabled = true; // Disable audio upload
+// Elements
+const startButton = document.getElementById("startButton");
+const stopButton = document.getElementById("stopButton");
+const audioPreview = document.getElementById("audioPreview");
+const recordingAlert = document.getElementById("recordingAlert");
+const recordingTime = document.getElementById("recordingTime");
+
+// Start the recording timer
+function startRecordingTimer() {
+    recordingTimer = setInterval(() => {
+        secondsElapsed++;
+        recordingTime.textContent = secondsElapsed + " seconds";
+    }, 1000);
+}
+
+// Stop the recording timer
+function stopRecordingTimer() {
+    clearInterval(recordingTimer);
+    recordingTimer = null;
+    secondsElapsed = 0;
+}
+
+// Function to trim audio
+async function trimAudio(blob, startTime, endTime) {
+    const audioContext = new AudioContext();
+    const arrayBuffer = await blob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    // Calculate the start and end in samples
+    const sampleRate = audioBuffer.sampleRate;
+    const startSample = Math.floor(startTime * sampleRate);
+    const endSample = Math.floor(endTime * sampleRate);
+
+    // Create a new audio buffer for the trimmed audio
+    const trimmedBuffer = audioContext.createBuffer(
+        audioBuffer.numberOfChannels,
+        endSample - startSample,
+        sampleRate
+    );
+
+    // Copy the trimmed samples to the new buffer
+    for (let channel = 0; channel < audioBuffer.numberOfChannels; channel++) {
+        const channelData = audioBuffer.getChannelData(channel);
+        trimmedBuffer.copyToChannel(
+            channelData.subarray(startSample, endSample),
+            channel
+        );
+    }
+
+    // Export the trimmed buffer to a Blob
+    const trimmedBlob = await bufferToWaveBlob(trimmedBuffer);
+    return trimmedBlob;
+}
+
+// Function to convert audio buffer to a Blob
+async function bufferToWaveBlob(buffer) {
+    const audioContext = new OfflineAudioContext(
+        buffer.numberOfChannels,
+        buffer.length,
+        buffer.sampleRate
+    );
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.start();
+
+    const renderedBuffer = await audioContext.startRendering();
+    const waveBlob = await audioBufferToWaveBlob(renderedBuffer);
+    return waveBlob;
+}
+
+// Convert an audio buffer to a WAV Blob
+function audioBufferToWaveBlob(buffer) {
+    return new Promise((resolve) => {
+        const worker = new Worker("wave-worker.js"); // A worker to process the WAV file
+        worker.postMessage(buffer);
+
+        worker.onmessage = (e) => {
+            const { data } = e;
+            resolve(new Blob([data], { type: "audio/wav" }));
+        };
+    });
+}
+
+// Start recording
+startButton.addEventListener("click", async () => {
+    try {
         audioChunks = [];
-        secondsElapsed = 0; // Reset the counter
+        secondsElapsed = 0;
+
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         mediaRecorder = new MediaRecorder(stream);
         mediaRecorder.start();
 
-        mediaRecorder.ondataavailable = event => {
+        mediaRecorder.ondataavailable = (event) => {
             if (event.data.size > 0) {
                 audioChunks.push(event.data);
             }
         };
 
-        mediaRecorder.addEventListener('stop', () => {
-            const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+        mediaRecorder.addEventListener("stop", async () => {
+            audioBlob = new Blob(audioChunks, { type: "audio/wav" });
+
+            // If trimming is required
+            if (startTrim >= 0 && endTrim > startTrim) {
+                const trimmedAudio = await trimAudio(audioBlob, startTrim, endTrim);
+
+                // Send the trimmed audio to the server
+                uploadAudio(trimmedAudio);
+            } else {
+                // Send the full audio to the server
+                uploadAudio(audioBlob);
+            }
+
+            // Display the recorded or trimmed audio preview
             const audioUrl = URL.createObjectURL(audioBlob);
             audioPreview.src = audioUrl;
-            audioPreview.style.display = 'block';
-            trimmingSection.style.display = 'block';
-
-            // Set range max based on recorded duration
-            trimEnd.max = secondsElapsed;
-            trimEnd.value = secondsElapsed;
-
-            // Convert audio blob to base64
-            const reader = new FileReader();
-            reader.onload = function () {
-                recordedAudioInput.value = reader.result.split(',')[1]; // Store base64 data in hidden input
-            };
-            reader.readAsDataURL(audioBlob);
+            audioPreview.style.display = "block";
         });
 
-        // Start the counter and show the alert
-        recordingAlert.style.display = 'block';
-        recordingTime.textContent = secondsElapsed;
-        recordingInterval = setInterval(() => {
-            secondsElapsed += 1;
-            recordingTime.textContent = secondsElapsed;
-        }, 1000);
-
-        // Stop recording after 30 seconds automatically
-        recordingTimeout = setTimeout(() => {
-            stopRecording();
-        }, 30000);
-
+        // UI updates
+        recordingAlert.style.display = "block";
+        recordingTime.textContent = secondsElapsed + " seconds";
+        startRecordingTimer();
         startButton.disabled = true;
         stopButton.disabled = false;
-    });
+    } catch (err) {
+        console.error("Error starting audio recording:", err);
+        alert("Failed to start audio recording. Please try again.");
+    }
+});
 
-    // Disable recording buttons when an audio file is uploaded
-    audioUpload.addEventListener('change', () => {
-        startButton.disabled = true;
-        stopButton.disabled = true;
-        recordingAlert.style.display = 'none';
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-            stopRecording();
-        }
-    });
-
-    stopButton.addEventListener('click', stopRecording);
-
-    function stopRecording() {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-            mediaRecorder.stop();
-        }
-        clearInterval(recordingInterval);
-        clearTimeout(recordingTimeout);
-        recordingAlert.style.display = 'none';
+// Stop recording
+stopButton.addEventListener("click", () => {
+    if (mediaRecorder) {
+        mediaRecorder.stop();
+        stopRecordingTimer();
+        recordingAlert.style.display = "none";
         startButton.disabled = false;
         stopButton.disabled = true;
     }
+});
 
-    // Handle trimming
-    trimStart.addEventListener('input', () => {
-        startTimeLabel.textContent = trimStart.value;
-        if (parseInt(trimStart.value) > parseInt(trimEnd.value)) {
-            trimEnd.value = trimStart.value;
-            endTimeLabel.textContent = trimEnd.value;
-        }
-    });
+// Upload audio
+function uploadAudio(blob) {
+    const formData = new FormData();
+    formData.append("recorded_audio", blob, "trimmed_audio.wav");
 
-    trimEnd.addEventListener('input', () => {
-        endTimeLabel.textContent = trimEnd.value;
-        if (parseInt(trimEnd.value) < parseInt(trimStart.value)) {
-            trimStart.value = trimEnd.value;
-            startTimeLabel.textContent = trimStart.value;
-        }
-    });
+    fetch("{{ url_for('upload_media') }}", {
+        method: "POST",
+        body: formData,
+    })
+        .then((response) => {
+            if (response.ok) {
+                alert("Audio successfully uploaded!");
+            } else {
+                alert("Error uploading audio. Please try again.");
+            }
+        })
+        .catch((err) => {
+            console.error("Upload error:", err);
+            alert("Error uploading audio. Please try again.");
+        });
+}
 
-    applyTrimButton.addEventListener('click', () => {
-        const start = parseInt(trimStart.value);
-        const end = parseInt(trimEnd.value);
-        if (start >= end) {
-            alert('Invalid trimming range.');
-            return;
-        }
-        // Generate trimmed audio
-        const trimmedBlob = new Blob(audioChunks.slice(start, end), { type: 'audio/wav' });
-        const audioUrl = URL.createObjectURL(trimmedBlob);
-        audioPreview.src = audioUrl;
-
-        // Update hidden input with trimmed audio
-        const reader = new FileReader();
-        reader.onload = function () {
-            recordedAudioInput.value = reader.result.split(',')[1]; // Update base64 data
-        };
-        reader.readAsDataURL(trimmedBlob);
-    });
 </script>
 
 {% endblock %}
